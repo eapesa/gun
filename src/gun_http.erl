@@ -79,6 +79,15 @@ handle(Data, State=#http_state{in=head, buffer=Buffer}) ->
 handle(Data, State=#http_state{in=body_close}) ->
 	send_data_if_alive(Data, State, nofin),
 	State;
+handle(Data, State=#http_state{in=body_sse, buffer=Buffer, connection=Conn}) ->
+  Buffer2 = << Buffer/binary, Data/binary >>,
+  send_data_if_alive(Buffer2, State, fin),
+  case Conn of
+    keepalive ->
+      handle(<<>>, end_stream(State#http_state{buffer = <<>>}));
+    close ->
+      close
+  end;
 handle(Data, State=#http_state{in=body_chunked, in_state=InState,
 		buffer=Buffer, connection=Conn}) ->
 	Buffer2 = << Buffer/binary, Data/binary >>,
@@ -221,7 +230,8 @@ request(State=#http_state{socket=Socket, transport=Transport, version=Version,
 	Conn = conn_from_headers(Version, Headers2),
 	Out = request_io_from_headers(Headers2),
 	Headers4 = case Out of
-		body_chunked -> [{<<"transfer-encoding">>, <<"chunked">>}|Headers3];
+		H when (H =:= body_chunked) or (H =:= body_sse) -> 
+      [{<<"transfer-encoding">>, <<"chunked">>}|Headers3];
 		_ -> Headers3
 	end,
 	Transport:send(Socket, cow_http:request(Method, Path, Version, Headers4)),
@@ -354,7 +364,13 @@ response_io_from_headers(Version, Headers) ->
 		_ ->
 			case lists:keyfind(<<"transfer-encoding">>, 1, Headers) of
 				false ->
-					body_close;
+					case lists:keyfind(<<"content-type">>, 1, Headers) of
+            {_, <<"text/event-stream", _Charset/binary>>} ->
+              io:format("[RIFH] Check if event-stream content-type: ~p~n", [_Charset]),
+              body_sse;
+            _ ->
+              body_close
+          end;
 				{_, TE} ->
 					case cow_http_hd:parse_transfer_encoding(TE) of
 						[<<"chunked">>] -> body_chunked;
